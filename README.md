@@ -87,4 +87,4 @@ Each plugin is a self-contained subdirectory at the repo root.
 
 ## License
 
-[MIT](./LICENSE) — © 2026 Ask-Y Data Products Ltd.
+[MIT](./LICENSE) — © 2026 Ask-Y Inc.
