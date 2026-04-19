@@ -62,7 +62,138 @@
 
 "use strict";
 
+const http  = require("node:http");
+const https = require("node:https");
+const net   = require("node:net");
+const tls   = require("node:tls");
+
 const BACKEND_URL = (process.env.PRISM_BACKEND_URL || "https://appstage.ask-y.ai").replace(/\/+$/, "");
+
+// ──────────────────────── proxy-aware HTTP client ────────────────────────
+//
+// Claude Cowork (and many corporate sandboxes) block direct egress but
+// expose an HTTP CONNECT proxy via the HTTPS_PROXY / HTTP_PROXY env vars.
+// Node's built-in global fetch does NOT honour those env vars, and
+// `require("undici")` is not available as a built-in module (only the
+// embedded copy fetch uses internally is). So we use node:https with a
+// custom Agent that tunnels through the proxy via HTTP CONNECT — pure
+// stdlib, zero dependencies.
+//
+// Priority: HTTPS_PROXY > HTTP_PROXY > ALL_PROXY. Skip ALL_PROXY if it's
+// a socks:// URL (we don't implement SOCKS).
+const PROXY_URL = (() => {
+  const raw =
+    process.env.HTTPS_PROXY || process.env.https_proxy ||
+    process.env.HTTP_PROXY  || process.env.http_proxy  ||
+    process.env.ALL_PROXY   || process.env.all_proxy   || null;
+  if (!raw) return null;
+  if (/^socks/i.test(raw)) return null;
+  return raw;
+})();
+
+if (PROXY_URL) {
+  process.stderr.write(`[prism-cli] routing HTTPS via proxy ${PROXY_URL}\n`);
+}
+
+// Custom https.Agent that establishes an HTTP CONNECT tunnel through the
+// configured proxy, then wraps the tunnel in TLS. https.request() calls
+// createConnection() internally when sending a request — this is how
+// we slip the CONNECT dance in.
+class HttpsProxyAgent extends https.Agent {
+  constructor(proxyUrl, opts) {
+    super({ keepAlive: false, ...(opts || {}) });
+    this.proxyUrl = new URL(proxyUrl);
+  }
+  createConnection(options, callback) {
+    const proxyHost = this.proxyUrl.hostname;
+    const proxyPort = parseInt(this.proxyUrl.port, 10) ||
+      (this.proxyUrl.protocol === "https:" ? 443 : 80);
+    const targetHost = options.host;
+    const targetPort = options.port;
+
+    const sock = net.connect({ host: proxyHost, port: proxyPort });
+    sock.once("error", (err) => callback(err));
+    sock.once("connect", () => {
+      let req =
+        `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n` +
+        `Host: ${targetHost}:${targetPort}\r\n`;
+      if (this.proxyUrl.username) {
+        const creds = `${decodeURIComponent(this.proxyUrl.username)}:${decodeURIComponent(this.proxyUrl.password || "")}`;
+        req += `Proxy-Authorization: Basic ${Buffer.from(creds).toString("base64")}\r\n`;
+      }
+      req += "\r\n";
+      sock.write(req);
+
+      let buf = "";
+      const onData = (chunk) => {
+        buf += chunk.toString("ascii");
+        const endIdx = buf.indexOf("\r\n\r\n");
+        if (endIdx === -1) return;
+        sock.removeListener("data", onData);
+        const statusLine = buf.slice(0, buf.indexOf("\r\n"));
+        const statusMatch = /^HTTP\/[0-9.]+ (\d{3})/.exec(statusLine);
+        const code = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+        if (code !== 200) {
+          sock.destroy();
+          return callback(new Error(`Proxy CONNECT to ${targetHost}:${targetPort} failed: ${statusLine}`));
+        }
+        // Wrap the established tunnel in TLS targeting the real host.
+        const tlsSock = tls.connect({
+          socket: sock,
+          servername: targetHost,
+          host: targetHost,
+          port: targetPort,
+          ALPNProtocols: ["http/1.1"],
+        });
+        tlsSock.once("error", (err) => callback(err));
+        tlsSock.once("secureConnect", () => callback(null, tlsSock));
+      };
+      sock.on("data", onData);
+    });
+  }
+}
+
+const PROXY_AGENT = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : null;
+
+// Minimal fetch-shaped wrapper over node:https.request, with the proxy
+// agent threaded through when configured. Returns { status, headers,
+// text(), ok } so the rest of the code reads like fetch.
+function pfetch(urlStr, { method = "GET", headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(urlStr); } catch (err) { return reject(err); }
+    const lib = u.protocol === "https:" ? https : http;
+    const opts = {
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === "https:" ? 443 : 80),
+      path: u.pathname + u.search,
+      method,
+      headers: { ...headers },
+    };
+    if (PROXY_AGENT && u.protocol === "https:") opts.agent = PROXY_AGENT;
+
+    const req = lib.request(opts, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        const text = buf.toString("utf8");
+        resolve({
+          status: res.statusCode,
+          statusText: res.statusMessage,
+          headers: res.headers,
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          text: async () => text,
+        });
+      });
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    if (body !== undefined && body !== null) req.write(body);
+    req.end();
+  });
+}
 
 // Exit with a structured error to stderr; optionally emit a JSON payload
 // on stdout so the skill can still parse a machine-readable shape.
@@ -83,10 +214,10 @@ function requireSessionId(argv, usage) {
   return id;
 }
 
-// Thin wrapper around fetch. `sessionId` is null for the unauthenticated
-// endpoints (session-start, session-status, logout); otherwise it's
-// threaded into the X-Mcp-Session header so the backend can resolve it
-// to a cached JWT server-side.
+// Thin wrapper around pfetch (our proxy-aware HTTP client). `sessionId`
+// is null for the unauthenticated endpoints (session-start, session-
+// status, logout); otherwise it's threaded into the X-Mcp-Session header
+// so the backend can resolve it to a cached JWT server-side.
 async function api(method, routePath, { sessionId = null, body = undefined } = {}) {
   const url = BACKEND_URL + routePath;
   const headers = { "Accept": "application/json" };
@@ -98,31 +229,32 @@ async function api(method, routePath, { sessionId = null, body = undefined } = {
   }
 
   let resp;
-  try { resp = await fetch(url, init); }
+  try { resp = await pfetch(url, init); }
   catch (err) {
-    // undici wraps the underlying OS error (ENOTFOUND, ECONNREFUSED,
-    // ECONNRESET, UND_ERR_CONNECT_TIMEOUT, etc.) in err.cause. Surface it
-    // so the skill can distinguish DNS failure from allowlist miss from
-    // general egress block.
-    const cause = err.cause || {};
-    const causeSummary = cause.code
-      ? `${cause.code}${cause.syscall ? ` syscall=${cause.syscall}` : ""}${cause.hostname ? ` host=${cause.hostname}` : ""}`
+    // Node stdlib errors expose .code, .syscall, .errno, .hostname
+    // directly. Forward the whole detail so the skill can tell
+    // ENOTFOUND from ECONNREFUSED from proxy-CONNECT-failed.
+    const code = err.code || null;
+    const causeSummary = code
+      ? `${code}${err.syscall ? ` syscall=${err.syscall}` : ""}${err.hostname ? ` host=${err.hostname}` : ""}`
       : null;
     fail(6, `network error talking to ${url}: ${err.message}${causeSummary ? ` (${causeSummary})` : ""}`, {
       ok: false, code: "network_error",
       backendUrl: BACKEND_URL,
+      proxy: PROXY_URL || null,
       message:
         `Could not reach the Prism backend (${BACKEND_URL}). ` +
-        `If you're running inside Claude Cowork, this usually means the ` +
-        `plugin sandbox is blocking outbound HTTPS — run /prism:diag for ` +
-        `detailed probes and contact the Ask-Y team with the output.`,
+        (PROXY_URL
+          ? `Tried via proxy ${PROXY_URL} but that failed too. `
+          : `No proxy configured. `) +
+        `Run /prism:diag for detailed probes and share with the Ask-Y team.`,
       detail: err.message,
       cause: {
-        code: cause.code || null,
-        errno: cause.errno || null,
-        syscall: cause.syscall || null,
-        hostname: cause.hostname || null,
-        message: cause.message || null,
+        code: err.code || null,
+        errno: err.errno || null,
+        syscall: err.syscall || null,
+        hostname: err.hostname || null,
+        message: err.message || null,
       },
     });
   }
@@ -288,7 +420,7 @@ async function cmdDiag(argv) {
 
   const report = {
     ok: true,
-    plugin_version: "0.9.1",
+    plugin_version: "0.9.2",
     node_version: process.version,
     platform: process.platform,
     arch: process.arch,
@@ -305,6 +437,8 @@ async function cmdDiag(argv) {
       ALL_PROXY: process.env.ALL_PROXY || process.env.all_proxy || null,
     },
     env_sandbox_hints: {},
+    proxy_agent_installed: !!PROXY_AGENT,
+    proxy_agent_url: PROXY_URL,
     homedir: safeCall(() => os.homedir()),
     tmpdir: safeCall(() => os.tmpdir()),
     cwd: safeCall(() => process.cwd()),
@@ -362,11 +496,14 @@ async function cmdDiag(argv) {
     }
   }
 
-  // Multi-target fetch probes. Keep the list short but diagnostic.
+  // Multi-target probes using the proxy-aware client. When PROXY_URL is
+  // set, these all tunnel via CONNECT through the proxy. Errors from
+  // node:net / node:https / node:tls expose .code/.syscall directly —
+  // no .cause chain unwrapping needed.
   async function probe(label, url, opts = {}) {
     const t0 = Date.now();
     try {
-      const r = await fetch(url, { method: "GET", ...opts });
+      const r = await pfetch(url, { method: "GET", ...opts });
       return {
         label, url,
         ok: true,
@@ -374,17 +511,16 @@ async function cmdDiag(argv) {
         latency_ms: Date.now() - t0,
       };
     } catch (err) {
-      const cause = err.cause || {};
       return {
         label, url,
         ok: false,
         error: err.message,
         error_name: err.name,
-        cause_code: cause.code || null,
-        cause_errno: cause.errno || null,
-        cause_syscall: cause.syscall || null,
-        cause_hostname: cause.hostname || null,
-        cause_message: cause.message || null,
+        cause_code: err.code || null,
+        cause_errno: err.errno || null,
+        cause_syscall: err.syscall || null,
+        cause_hostname: err.hostname || null,
+        cause_message: err.message || null,
         latency_ms: Date.now() - t0,
       };
     }
@@ -407,41 +543,45 @@ async function cmdDiag(argv) {
   const hasProxyEnv = !!(report.env.HTTP_PROXY || report.env.HTTPS_PROXY || report.env.ALL_PROXY);
 
   if (backendOk) {
-    report.verdict = "ok";
-    report.hint = "Outbound HTTPS to the backend works. If /prism:login still fails, it's not a sandbox egress issue.";
-  } else if (allOtherFailed && report.dns_probe && !report.dns_probe.ok) {
+    report.verdict = report.proxy_agent_installed ? "ok_via_proxy" : "ok";
+    report.hint = report.proxy_agent_installed
+      ? `Outbound HTTPS reaches the backend via proxy ${report.proxy_agent_url}. /prism:login should work.`
+      : "Outbound HTTPS to the backend works directly. /prism:login should work.";
+  } else if (report.proxy_agent_installed && allOtherFailed) {
+    report.verdict = "proxy_installed_but_still_blocked";
+    report.hint = `Proxy ${report.proxy_agent_url} was installed but all probes still failed. The proxy itself may be down, may require auth, or may be MITM'ing TLS with a cert we don't trust. Share this report with the Ask-Y team.`;
+  } else if (allOtherFailed && report.dns_probe && !report.dns_probe.ok && !hasProxyEnv) {
     report.verdict = "sandbox_blocks_dns";
-    report.hint = "DNS lookup of the backend hostname failed. The Cowork sandbox is blocking DNS — no outbound traffic is possible.";
-  } else if (allOtherFailed) {
+    report.hint = "DNS lookup failed and no proxy is configured. The sandbox blocks all egress.";
+  } else if (allOtherFailed && !hasProxyEnv) {
     report.verdict = "sandbox_blocks_all_egress";
-    report.hint = "Every outbound probe failed (backend + Cloudflare + Anthropic). The Cowork sandbox is blocking all egress for bash-invoked Node. Contact Anthropic about Cowork plugin-sandbox egress policy.";
+    report.hint = "Every outbound probe failed and no proxy is configured. The sandbox blocks all egress.";
   } else if (!backendOk && anyOtherOk) {
     report.verdict = "sandbox_allowlist_excludes_backend";
-    report.hint = "Other hosts are reachable but appstage.ask-y.ai is not. The Cowork sandbox has a host allowlist that excludes our backend. Ask the Cowork admin / Anthropic about allowlisting appstage.ask-y.ai.";
-  } else if (!backendOk && hasProxyEnv) {
-    report.verdict = "proxy_required_not_used";
-    report.hint = "A proxy env var is set but undici's fetch may not be using it. Need undici.ProxyAgent or native ProxyAgent support.";
+    report.hint = "Other hosts are reachable but appstage.ask-y.ai is not. The sandbox/proxy has a host allowlist that excludes our backend.";
+  } else if (!backendOk && hasProxyEnv && !report.proxy_agent_installed) {
+    report.verdict = "proxy_env_present_but_agent_failed";
+    report.hint = "Proxy env vars are set but undici.ProxyAgent could not be installed. Check prism-cli.js startup logs.";
   } else {
     report.verdict = "backend_unreachable_unknown";
     report.hint = "Backend is unreachable but the reason doesn't match a known pattern. Share the full report with the Ask-Y team.";
   }
 
-  // Optional session-status probe. Same fetch, captures cause chain.
+  // Optional session-status probe via the proxy-aware client.
   if (argv[0] && argv[0].length >= 16) {
     const sid = argv[0];
     const t0 = Date.now();
     try {
-      const r = await fetch(`${BACKEND_URL}/api/auth/mcp-session/${encodeURIComponent(sid)}/status`);
+      const r = await pfetch(`${BACKEND_URL}/api/auth/mcp-session/${encodeURIComponent(sid)}/status`);
       const text = await r.text();
       let body = {};
       try { body = JSON.parse(text); } catch {}
       report.session = { http_status: r.status, body, latency_ms: Date.now() - t0 };
     } catch (err) {
-      const cause = err.cause || {};
       report.session = {
         error: err.message,
-        cause_code: cause.code || null,
-        cause_syscall: cause.syscall || null,
+        cause_code: err.code || null,
+        cause_syscall: err.syscall || null,
       };
     }
   }
