@@ -1,0 +1,15 @@
+# Normalize line endings across OSes so Node shebangs stay LF-only and
+# cross-platform diffs don't flip back and forth.
+* text=auto eol=lf
+
+# Windows batch files must keep CRLF or cmd.exe refuses to run them.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Treat these as binary — never touch their bytes.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
