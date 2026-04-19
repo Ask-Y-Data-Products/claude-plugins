@@ -1,8 +1,14 @@
 {
   "name": "prism",
-  "version": "0.9.2",
-  "description": "Prism plugin for Claude clients (Claude Code, Cowork, etc.): browser-based secure sign-in, then list workspaces, projects, and catalog. Stateless — works in sandboxed plugin runtimes. Credentials never transit chat.",
+  "version": "0.10.0",
+  "description": "Prism plugin for Claude clients (Claude Code, Cowork, etc.): browser-based secure sign-in, then list workspaces, projects, and catalog. Includes a remote MCP server for sandboxed clients like Cowork. Credentials never transit chat.",
   "author": { "name": "Ask-Y" },
   "homepage": "https://github.com/Ask-Y-Data-Products/claude-plugins",
-  "repository": "https://github.com/Ask-Y-Data-Products/claude-plugins"
+  "repository": "https://github.com/Ask-Y-Data-Products/claude-plugins",
+  "mcpServers": {
+    "prism": {
+      "type": "http",
+      "url": "https://appstage.ask-y.ai/mcp"
+    }
+  }
 }
