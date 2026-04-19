@@ -1,6 +1,6 @@
 {
   "name": "ask-y-claude-plugins",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Official Ask-Y Claude plugins marketplace — tooling metadata only; plugins themselves are dep-free.",
   "private": true,
   "scripts": {

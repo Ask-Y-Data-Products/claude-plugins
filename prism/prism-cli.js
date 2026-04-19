@@ -100,15 +100,30 @@ async function api(method, routePath, { sessionId = null, body = undefined } = {
   let resp;
   try { resp = await fetch(url, init); }
   catch (err) {
-    fail(6, `network error talking to ${url}: ${err.message}`, {
+    // undici wraps the underlying OS error (ENOTFOUND, ECONNREFUSED,
+    // ECONNRESET, UND_ERR_CONNECT_TIMEOUT, etc.) in err.cause. Surface it
+    // so the skill can distinguish DNS failure from allowlist miss from
+    // general egress block.
+    const cause = err.cause || {};
+    const causeSummary = cause.code
+      ? `${cause.code}${cause.syscall ? ` syscall=${cause.syscall}` : ""}${cause.hostname ? ` host=${cause.hostname}` : ""}`
+      : null;
+    fail(6, `network error talking to ${url}: ${err.message}${causeSummary ? ` (${causeSummary})` : ""}`, {
       ok: false, code: "network_error",
       backendUrl: BACKEND_URL,
       message:
         `Could not reach the Prism backend (${BACKEND_URL}). ` +
         `If you're running inside Claude Cowork, this usually means the ` +
-        `plugin sandbox is blocking outbound HTTPS — contact the Ask-Y ` +
-        `team with this error and your Cowork org name.`,
+        `plugin sandbox is blocking outbound HTTPS — run /prism:diag for ` +
+        `detailed probes and contact the Ask-Y team with the output.`,
       detail: err.message,
+      cause: {
+        code: cause.code || null,
+        errno: cause.errno || null,
+        syscall: cause.syscall || null,
+        hostname: cause.hostname || null,
+        message: cause.message || null,
+      },
     });
   }
 
@@ -252,11 +267,28 @@ async function cmdUserState(argv) {
 // Sandbox diagnostic — helps debug Cowork-specific issues (ephemeral FS,
 // egress restrictions, missing env vars). Never throws; emits a JSON blob
 // on stdout with whatever it can probe.
+//
+// The probe matrix is designed to triangulate where the sandbox is
+// blocking us:
+//
+//   - If DNS lookup of our hostname fails → sandbox has no DNS, or
+//     DNS is allowlisted.
+//   - If all HTTPS probes fail the same way → full egress block.
+//   - If only our backend fails but Cloudflare / Anthropic succeed →
+//     host-level allowlist (admin can request addition).
+//   - If everything fails but an env-proxy var is set → proxy required
+//     and undici isn't using it (need undici.ProxyAgent).
+//
+// Every probe captures err.cause.{code,errno,syscall,hostname} so the
+// real OS-level error (ENOTFOUND, ECONNREFUSED, UND_ERR_CONNECT_TIMEOUT,
+// etc.) is surfaced — `fetch failed` alone is useless.
 async function cmdDiag(argv) {
   const os = require("node:os");
+  const dns = require("node:dns").promises;
+
   const report = {
     ok: true,
-    plugin_version: "0.9.0",
+    plugin_version: "0.9.1",
     node_version: process.version,
     platform: process.platform,
     arch: process.arch,
@@ -267,62 +299,150 @@ async function cmdDiag(argv) {
       CLAUDE_PLUGIN_DATA: process.env.CLAUDE_PLUGIN_DATA || null,
       HOME: process.env.HOME || null,
       USERPROFILE: process.env.USERPROFILE || null,
+      HTTP_PROXY: process.env.HTTP_PROXY || process.env.http_proxy || null,
+      HTTPS_PROXY: process.env.HTTPS_PROXY || process.env.https_proxy || null,
+      NO_PROXY: process.env.NO_PROXY || process.env.no_proxy || null,
+      ALL_PROXY: process.env.ALL_PROXY || process.env.all_proxy || null,
     },
+    env_sandbox_hints: {},
     homedir: safeCall(() => os.homedir()),
     tmpdir: safeCall(() => os.tmpdir()),
     cwd: safeCall(() => process.cwd()),
-    fetch_probe: null,
+    dns_probe: null,
+    fetch_probes: [],
+    verdict: null,
+    hint: null,
     session: null,
   };
 
-  // Probe outbound network to the backend. This is the single most
-  // useful signal for Cowork debugging: if this fails, the plugin is
-  // fundamentally unusable in the current sandbox.
-  try {
-    const t0 = Date.now();
-    const r = await fetch(`${BACKEND_URL}/health`, { method: "GET" });
-    report.fetch_probe = {
-      ok: true,
-      status: r.status,
-      latency_ms: Date.now() - t0,
-    };
-  } catch (err) {
+  // Capture any env vars that look sandbox/proxy-related. These often
+  // reveal the egress mechanism (e.g. a Claude/Cowork-provided proxy).
+  //
+  // Redaction rules (the output of this command ends up in chat):
+  //   - Always redact values whose KEY NAME looks like a secret
+  //     (TOKEN / SECRET / KEY / PASSWORD / AUTH / CREDENTIAL).
+  //   - Otherwise, show the value verbatim (these are usually URLs,
+  //     version strings, boolean flags — genuine diagnostic signal).
+  //   - Always show the KEY; the key name alone is often enough to
+  //     diagnose sandbox mechanics without leaking a secret.
+  const secretKeyPattern = /TOKEN|SECRET|PASSWORD|CREDENTIAL|APIKEY|API_KEY|^KEY$|_KEY$|AUTH(?!OR)/i;
+  for (const [k, v] of Object.entries(process.env)) {
+    if (/^(CLAUDE|ANTHROPIC|COWORK|SANDBOX|NODE_EXTRA|SSL_CERT|NODE_TLS|CA_)/i.test(k)) {
+      if (secretKeyPattern.test(k) && v && v.length > 0) {
+        report.env_sandbox_hints[k] = `<redacted:${v.length}chars>`;
+      } else {
+        report.env_sandbox_hints[k] = v;
+      }
+    }
+  }
+
+  // DNS probe — does the sandbox even resolve our hostname? A DNS-only
+  // allowlist (common in locked-down networks) will show up here before
+  // the TCP/TLS handshake.
+  let backendHost = null;
+  try { backendHost = new URL(BACKEND_URL).hostname; } catch {}
+  if (backendHost) {
     try {
-      // /health may not exist on every backend; fall back to POSTing the
-      // pre-auth mcp-session endpoint which we know is always live.
       const t0 = Date.now();
-      const r = await fetch(`${BACKEND_URL}/api/auth/mcp-session`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-      report.fetch_probe = {
+      const addrs = await dns.lookup(backendHost, { all: true });
+      report.dns_probe = {
+        host: backendHost,
         ok: true,
-        status: r.status,
+        addresses: addrs,
         latency_ms: Date.now() - t0,
-        path: "/api/auth/mcp-session",
       };
-    } catch (err2) {
-      report.fetch_probe = {
+    } catch (err) {
+      report.dns_probe = {
+        host: backendHost,
         ok: false,
-        error: err2.message,
-        hint:
-          "Outbound HTTPS to the backend failed. If this is Claude Cowork, " +
-          "the sandbox may be blocking egress — contact the Ask-Y team.",
+        error: err.message,
+        code: err.code || null,
+        errno: err.errno || null,
       };
     }
   }
 
-  // If a session id is supplied, report its status too.
-  if (argv[0] && argv[0].length >= 16) {
+  // Multi-target fetch probes. Keep the list short but diagnostic.
+  async function probe(label, url, opts = {}) {
+    const t0 = Date.now();
     try {
-      const r = await fetch(`${BACKEND_URL}/api/auth/mcp-session/${encodeURIComponent(argv[0])}/status`);
+      const r = await fetch(url, { method: "GET", ...opts });
+      return {
+        label, url,
+        ok: true,
+        status: r.status,
+        latency_ms: Date.now() - t0,
+      };
+    } catch (err) {
+      const cause = err.cause || {};
+      return {
+        label, url,
+        ok: false,
+        error: err.message,
+        error_name: err.name,
+        cause_code: cause.code || null,
+        cause_errno: cause.errno || null,
+        cause_syscall: cause.syscall || null,
+        cause_hostname: cause.hostname || null,
+        cause_message: cause.message || null,
+        latency_ms: Date.now() - t0,
+      };
+    }
+  }
+
+  report.fetch_probes.push(await probe(
+    "backend",
+    `${BACKEND_URL}/api/auth/mcp-session`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  ));
+  report.fetch_probes.push(await probe("cloudflare_ip", "https://1.1.1.1/"));
+  report.fetch_probes.push(await probe("cloudflare_name", "https://www.cloudflare.com/"));
+  report.fetch_probes.push(await probe("anthropic_api", "https://api.anthropic.com/"));
+
+  // Interpret the probe matrix.
+  const backendOk = report.fetch_probes[0].ok;
+  const otherProbes = report.fetch_probes.slice(1);
+  const anyOtherOk = otherProbes.some(p => p.ok);
+  const allOtherFailed = otherProbes.every(p => !p.ok);
+  const hasProxyEnv = !!(report.env.HTTP_PROXY || report.env.HTTPS_PROXY || report.env.ALL_PROXY);
+
+  if (backendOk) {
+    report.verdict = "ok";
+    report.hint = "Outbound HTTPS to the backend works. If /prism:login still fails, it's not a sandbox egress issue.";
+  } else if (allOtherFailed && report.dns_probe && !report.dns_probe.ok) {
+    report.verdict = "sandbox_blocks_dns";
+    report.hint = "DNS lookup of the backend hostname failed. The Cowork sandbox is blocking DNS — no outbound traffic is possible.";
+  } else if (allOtherFailed) {
+    report.verdict = "sandbox_blocks_all_egress";
+    report.hint = "Every outbound probe failed (backend + Cloudflare + Anthropic). The Cowork sandbox is blocking all egress for bash-invoked Node. Contact Anthropic about Cowork plugin-sandbox egress policy.";
+  } else if (!backendOk && anyOtherOk) {
+    report.verdict = "sandbox_allowlist_excludes_backend";
+    report.hint = "Other hosts are reachable but appstage.ask-y.ai is not. The Cowork sandbox has a host allowlist that excludes our backend. Ask the Cowork admin / Anthropic about allowlisting appstage.ask-y.ai.";
+  } else if (!backendOk && hasProxyEnv) {
+    report.verdict = "proxy_required_not_used";
+    report.hint = "A proxy env var is set but undici's fetch may not be using it. Need undici.ProxyAgent or native ProxyAgent support.";
+  } else {
+    report.verdict = "backend_unreachable_unknown";
+    report.hint = "Backend is unreachable but the reason doesn't match a known pattern. Share the full report with the Ask-Y team.";
+  }
+
+  // Optional session-status probe. Same fetch, captures cause chain.
+  if (argv[0] && argv[0].length >= 16) {
+    const sid = argv[0];
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/auth/mcp-session/${encodeURIComponent(sid)}/status`);
       const text = await r.text();
       let body = {};
       try { body = JSON.parse(text); } catch {}
-      report.session = { http_status: r.status, body };
+      report.session = { http_status: r.status, body, latency_ms: Date.now() - t0 };
     } catch (err) {
-      report.session = { error: err.message };
+      const cause = err.cause || {};
+      report.session = {
+        error: err.message,
+        cause_code: cause.code || null,
+        cause_syscall: cause.syscall || null,
+      };
     }
   }
 
