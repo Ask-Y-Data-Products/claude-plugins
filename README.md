@@ -9,10 +9,12 @@ This marketplace hosts all Ask-Y plugins in one repo. Add it once and install an
 ```text
 /plugin marketplace add Ask-Y-Data-Products/claude-plugins
 /plugin install prism@ask-y
-/prism:setup
+/prism:login
 ```
 
-`/prism:setup` is a one-time step per user — it writes Prism-only permission rules into your `~/.claude/settings.json` and kicks off a browser sign-in. Restart your Claude client afterwards so the new permissions take effect.
+`/prism:login` returns a browser sign-in URL. Open it, sign in, and the
+plugin remembers the session for the rest of your conversation — no
+files written, no client restart, no setup step.
 
 > **Beta customer?** See [`INSTALL.md`](./INSTALL.md) for the full install guide covering both Claude Code and Claude Cowork (including the ZIP-upload path for Cowork org admins).
 
@@ -20,19 +22,19 @@ This marketplace hosts all Ask-Y plugins in one repo. Add it once and install an
 
 ### prism
 
-Claude plugin for the Prism data platform. Browser-based secure sign-in, then list workspaces, projects, and catalog through `/prism:*` slash commands. Credentials never transit the chat transcript or the model context.
+Claude plugin for the Prism data platform. Browser-based secure sign-in, then list workspaces, projects, and catalog through `/prism:*` slash commands. Stateless — works in sandboxed plugin runtimes like Claude Cowork. Credentials never transit the chat transcript or the model context.
 
 **Commands:**
 
 | Command | What it does |
 | --- | --- |
-| `/prism:setup` | one-time install (permission rules + sign-in) |
-| `/prism:login` | sign in via browser (session rendezvous) |
-| `/prism:logout` | clear cached credentials |
-| `/prism:status` | show who you're signed in as |
+| `/prism:login` | sign in via browser, start a Prism session for this conversation |
+| `/prism:logout` | invalidate the current session |
+| `/prism:status` | show who you're signed in as and when the session expires |
 | `/prism:workspaces` | list your Prism workspaces |
 | `/prism:projects [workspaceId]` | list projects in a workspace |
 | `/prism:catalog [workspaceId] [projectId] [--variation enlist]` | list catalog models |
+| `/prism:diag` | sandbox diagnostic (backend URL, reachability, session status) |
 
 Skill sources live under [`prism/commands/`](./prism/commands).
 
@@ -60,22 +62,21 @@ The default backend URL is set in `prism/.claude-plugin/plugin.json` and can be 
 
 ## Security model
 
-The plugin never asks for your password, token, or any credential inside the chat. Sign-in works via session rendezvous:
+The plugin never asks for your password, token, or any credential inside the chat. Sign-in works via server-side session rendezvous:
 
-1. Plugin asks the backend for a one-time session.
-2. Backend returns an opaque `sessionId` and a `loginUrl`.
-3. You open the URL in your real browser — same login page as the Prism web app.
-4. After you sign in, the backend releases the token to the plugin's background poll.
-5. The token is cached at `~/.prism-plugin/creds.json` on your machine and forwarded via `Authorization: Bearer` on subsequent API calls.
+1. Plugin asks the backend for a new session. Backend returns an opaque `sessionId` and a `loginUrl`.
+2. You open the URL in your real browser — same login page as the Prism web app.
+3. After you sign in, the backend stores the minted JWT **server-side**, keyed to the sessionId.
+4. Every subsequent `/prism:*` command sends only the `sessionId` via the `X-Mcp-Session` header. The backend resolves it to the cached JWT and executes the request.
 
-The token only ever flows plugin ↔ backend over HTTPS. Your chat transcript only sees the sign-in URL and a success message.
+The actual JWT never leaves the backend. Your chat transcript sees only the sign-in URL and the opaque sessionId (a session handle with the same lifetime as the JWT — revokable via `/prism:logout`).
 
 ## Troubleshooting
 
-- **"Prism isn't set up yet"** — run `/prism:setup` and restart your Claude client.
-- **"No cached credentials"** — run `/prism:login`.
+- **Session expired or not found** — run `/prism:login` to start a fresh session.
 - **Wrong backend** — set `PRISM_BACKEND_URL` in your environment.
 - **Sign-in URL doesn't open the right page** — verify the backend's `/api/auth/mcp-session` endpoint is returning a `loginUrl` that resolves to the Prism login page.
+- **Something's wrong and I can't tell what** — run `/prism:diag` for a sandbox probe (home, temp, env vars, outbound fetch reachability).
 
 ## Contributing a new plugin
 

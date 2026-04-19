@@ -19,12 +19,10 @@ Paste these three commands into Claude Code, one at a time:
 ```text
 /plugin marketplace add Ask-Y-Data-Products/claude-plugins
 /plugin install prism@ask-y
-/prism:setup
+/prism:login
 ```
 
-`/prism:setup` writes Prism-only permission rules into your `~/.claude/settings.json` and kicks off a browser sign-in.
-
-**Restart Claude Code** after setup finishes so the new permissions take effect. Then:
+`/prism:login` prints a browser sign-in URL. Open it, sign in, and that's it — every subsequent `/prism:*` command in this conversation uses the session. No client restart, no settings.json edits, no local files.
 
 ```text
 /prism:workspaces
@@ -49,30 +47,31 @@ Cowork requires a one-time org-admin setup, then per-user self-install.
 1. In Cowork, click **Customize** (left sidebar) → **Browse plugins**.
 2. Find **prism** in your org's catalog.
 3. Click **Install** → **Authorize**.
-4. Type `/prism:setup` in chat and follow the sign-in URL that appears.
+4. Type `/prism:login` in chat. Open the URL it gives you, sign in in your browser.
 5. Try `/prism:workspaces`.
+
+The Prism session lives for the duration of your Cowork conversation (up to ~6 hours, matching the Prism token's TTL). Start a fresh conversation and you'll `/prism:login` again.
 
 ## Available commands
 
 | Command | What it does |
 | --- | --- |
-| `/prism:setup` | One-time permission setup + first sign-in |
-| `/prism:login` | Re-run the browser sign-in (cached tokens last ~6 hours) |
-| `/prism:logout` | Clear cached credentials on this machine |
-| `/prism:status` | Show who you're signed in as |
+| `/prism:login` | Browser sign-in; establishes a Prism session for this conversation |
+| `/prism:logout` | Invalidate the current session on the backend |
+| `/prism:status` | Show who you're signed in as and when the session expires |
 | `/prism:workspaces` | List your Prism workspaces |
 | `/prism:projects [workspaceId]` | List projects in a workspace |
 | `/prism:catalog [workspaceId] [projectId] [--variation enlist]` | List catalog models |
+| `/prism:diag` | Sandbox diagnostic (backend reachability, env vars, session status) |
 
 When a command takes `[workspaceId]` or `[projectId]` arguments, omitting them makes the plugin fall back to your currently-selected workspace / project from the Prism web app.
 
 ## Troubleshooting
 
-- **"Prism isn't set up yet"** — run `/prism:setup` and restart your Claude client.
-- **"No cached credentials" / "run /prism:login"** — token expired or was never created. Run `/prism:login`.
+- **"Your Prism session has expired"** — run `/prism:login` to start a fresh session.
 - **Sign-in URL doesn't open Prism** — the URL should start with `https://appstage.ask-y.ai/mcp/login?...`. If it doesn't, stop and contact Ask-Y.
-- **"backend unreachable" / network errors** — confirm your machine can reach `https://appstage.ask-y.ai`. A VPN may be required if your Prism tenant is network-restricted.
-- **Plugin commands not showing up in Claude Code** — after `/prism:setup`, you must restart the Claude Code session once.
+- **"Could not reach the Prism backend"** — the plugin's outbound HTTPS to `https://appstage.ask-y.ai` is being blocked. In Claude Code this usually means a VPN / corporate proxy issue; in Cowork it may indicate a sandbox egress restriction. Run `/prism:diag` and share the output with your Ask-Y contact.
+- **Want to see what environment the plugin is running in** — `/prism:diag` prints home dir, temp dir, env vars, and a reachability probe.
 
 ## Updating the plugin
 
