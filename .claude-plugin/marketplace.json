@@ -1,0 +1,15 @@
+{
+  "name": "ask-y",
+  "owner": {
+    "name": "Ask-Y",
+    "description": "Official Ask-Y Claude plugins."
+  },
+  "plugins": [
+    {
+      "name": "prism",
+      "source": "./prism",
+      "description": "Claude plugin for the Prism data platform: browser-based sign-in, then list workspaces, projects, and catalog via /prism:* slash commands.",
+      "version": "0.8.0"
+    }
+  ]
+}
