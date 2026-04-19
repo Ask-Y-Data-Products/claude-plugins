@@ -1,20 +1,25 @@
 ---
-description: Sign out of Prism. Clears the cached 6-hour token so the next command will re-prompt for credentials.
+description: Sign out of Prism. Invalidates the current session so the next command will re-prompt for sign-in.
 ---
 
-**Setup gate — run this first:**
+Look for a Prism **sessionId** from earlier in this conversation.
+
+**If no sessionId is in context:** tell the user they aren't signed in
+(nothing to do) and stop.
+
+**If there is a sessionId**, run:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" check-setup
+node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" logout <sessionId>
 ```
 
-If the command exits with code `6`, stop and tell the user:
+The CLI prints `{"ok": true, "invalidated": true|false}` on stdout. Tell
+the user their Prism session has been signed out, and **forget the
+sessionId** — do not reuse it for any subsequent `/prism:*` command in
+this conversation. The next `/prism:*` command should trigger a fresh
+`/prism:login`.
 
-> Prism isn't set up yet. Run `/prism:setup` first, then restart your
-> Claude client so the new permissions take effect.
-
-If the exit code is `0`, continue.
-
-Call the `prism_logout` tool and confirm to the user that their cached
-Prism token was deleted. Mention that the next `/prism:*` command will
-ask them to sign in again.
+Exit-code handling:
+- `6` → network error; show the hint from stderr.
+- Anything else non-zero → show stderr verbatim. Still forget the
+  sessionId locally regardless of the server's response.

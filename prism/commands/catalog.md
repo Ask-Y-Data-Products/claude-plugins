@@ -3,27 +3,16 @@ description: List all tables / models in a project's catalog (enlist shape). Def
 argument-hint: "[workspace-id] [project-id]"
 ---
 
-**Setup gate — run this first:**
+This command needs a Prism **sessionId** from earlier in this conversation
+(look for the opaque ~43-char handle we received from `/prism:login`).
 
-```
-node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" check-setup
-```
-
-If the command exits with code `6`, stop and tell the user:
-
-> Prism isn't set up yet. Run `/prism:setup` first, then restart your
-> Claude client so the new permissions take effect.
-
-If the exit code is `0`, continue.
-
-List catalog models via the REST helper — do **not** call the
-`prism_list_catalog` MCP tool.
+**If no sessionId is in context:** run `/prism:login` first.
 
 **Resolve ids:**
 1. If `$ARGUMENTS` has `<workspaceId> <projectId>`, use them.
 2. Otherwise read the user's current selection from server-side state:
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" user-state __any__
+   node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" user-state <sessionId> __any__
    ```
    Use `selectedWorkspaceId` / `selectedProjectId` for any missing arg.
 3. If either is still missing, tell the user to either pass ids
@@ -33,7 +22,7 @@ List catalog models via the REST helper — do **not** call the
 Then fetch the catalog:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" catalog <workspaceId> <projectId>
+node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" catalog <sessionId> <workspaceId> <projectId>
 ```
 
 The CLI defaults to `--variation enlist`, giving the flat shape below on
@@ -63,10 +52,11 @@ stdout:
 defensively: fall back to `—` for anything missing.)
 
 **Exit-code handling:**
-- `2` / `3` → cached token missing or rejected. Tell the user to run
+- `2` / `3` → session expired or rejected. Tell the user to run
   `/prism:login` and stop. Never ask for credentials in chat — they go
   only into the Prism sign-in page.
 - `4` → show the CLI's stderr line (status + body snippet) and stop.
+- `6` → network error reaching the backend; show the hint from stderr.
 - `5` / `1` → internal / unexpected; surface stderr verbatim.
 
 **Rendering:** print the resolved `workspace_id` and `project_id` on a

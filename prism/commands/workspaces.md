@@ -2,31 +2,24 @@
 description: List all Prism workspaces the user has access to.
 ---
 
-**Setup gate — run this first:**
+This command needs a Prism **sessionId** from earlier in this conversation.
+Look in the conversation history for a sessionId we obtained from
+`/prism:login` (it looks like a ~43-character opaque string).
+
+**If no sessionId is in context yet:** run `/prism:login` first. Tell the
+user: "I need you to sign in before I can list workspaces. Running
+`/prism:login`..." and then proceed with that skill instead.
+
+**If a sessionId is in context**, run:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" check-setup
+node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" workspaces <sessionId>
 ```
 
-If the command exits with code `6`, the plugin isn't set up yet. Tell
-the user exactly this and stop — do not proceed, do not attempt the
-fetch below:
+(replace `<sessionId>` with the actual opaque handle; don't quote or alter
+it).
 
-> Prism isn't set up yet. Run `/prism:setup` first, then restart your
-> Claude client so the new permissions take effect.
-
-If the exit code is `0`, continue with the rest of this skill.
-
-List the user's Prism workspaces by calling the plugin's REST helper
-directly — do **not** use the `prism_list_workspaces` MCP tool for this.
-
-Run (via Bash):
-
-```
-node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" workspaces
-```
-
-The command prints a JSON object on stdout shaped like:
+The command prints JSON on stdout shaped like:
 
 ```json
 {
@@ -38,14 +31,18 @@ The command prints a JSON object on stdout shaped like:
 }
 ```
 
-**Exit-code handling (non-zero = nothing to render):**
-- `2` → no cached creds / token expired. Tell the user to run `/prism:login`
-  and stop. Do not retry, do not guess a URL.
-- `3` → backend rejected the token. Same action: tell the user to run
+**Exit-code handling (non-zero = something went wrong):**
+- `2` → session expired or not found. Tell the user the session has
+  expired and run `/prism:login` to start a fresh one. Stop.
+- `3` → backend rejected the session's token. Same remediation: run
   `/prism:login`.
 - `4` → backend returned a non-auth HTTP error. Show the CLI's stderr line
   verbatim so the user can see the status/body, then stop.
-- `5` → bad CLI args (shouldn't happen; report it as an internal issue).
+- `5` → missing sessionId (shouldn't happen if you checked above). Run
+  `/prism:login`.
+- `6` → network error reaching the backend. Show the hint from the JSON
+  payload — it may indicate a Cowork sandbox egress issue that needs to
+  be escalated to Ask-Y.
 - `1` → unexpected error; show stderr.
 
 NEVER ask the user for their email or password in chat — credentials only

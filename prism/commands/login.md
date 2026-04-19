@@ -2,37 +2,53 @@
 description: Start a secure Prism sign-in. Opens a browser flow — credentials never touch this chat.
 ---
 
-**Setup gate — run this first:**
+Run:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" check-setup
+node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" session-start
 ```
 
-If the command exits with code `6`, stop and tell the user:
+The command prints a JSON blob on stdout, e.g.:
 
-> Prism isn't set up yet. Run `/prism:setup` first, then restart your
-> Claude client so the new permissions take effect.
+```json
+{
+  "ok": true,
+  "sessionId": "aBcD...xyZ",
+  "loginUrl": "https://appstage.ask-y.ai/mcp/login?session=...",
+  "expiresAt": "2026-04-19T16:40:00Z"
+}
+```
 
-If the exit code is `0`, continue.
+Your response to the user MUST:
 
-Call the `prism_login` tool with an empty arguments object `{}`. NEVER pass
-email or password arguments — the tool ignores them for security reasons
-(credentials must not transit this chat).
+1. Show the `loginUrl` verbatim as a clickable URL on its own line. Do not
+   wrap it in markdown, do not modify it — the session handle in the URL is
+   essential and easy to corrupt.
+2. Tell the user: "Open the link in your browser and sign in. Once the
+   browser confirms you're signed in, just run any `/prism:*` command and
+   I'll pick up where we left off."
+3. **Remember the `sessionId` for the rest of this conversation.** Every
+   subsequent `/prism:*` command needs it — you'll pass it as the first
+   argument to the CLI. Treat the sessionId as the stable "Prism session"
+   handle for this conversation; do not ask the user to copy or paste it.
 
-The tool returns `{sign_in_url, expires_at, message}`. Your response to the
-user MUST:
+After the user signs in, the backend will release their token internally
+and associate it with this sessionId. Subsequent `/prism:workspaces`,
+`/prism:projects`, etc. will use the sessionId to authenticate — the token
+itself never leaves the backend.
 
-1. Show the `sign_in_url` verbatim as a clickable URL on its own line (no
-   markdown wrapping, no modification — the sessionId in the URL is
-   essential and easy to corrupt).
-2. Tell the user to open it in their browser and sign in on the Prism
-   page. Then tell them: "Once you've signed in, just run your original
-   `/prism:*` command — the bridge will already have the token cached, so
-   it will work immediately. No need to say anything back here."
+**Do NOT ask the user for their email or password in chat. Ever.** If the
+user offers them, tell them to enter them only on the sign-in page in
+their browser.
 
-Do **not** tell the user to say "done", "ready", "ok", or any other
-acknowledgement. The bridge polls the backend in the background the moment
-sign-in completes, so by the time the user re-runs their command the token
-is already on disk.
+**If you want to confirm sign-in completed** before running another
+command, you can optionally poll:
 
-Do not ask the user for their email or password in chat. Ever.
+```
+node "${CLAUDE_PLUGIN_ROOT}/prism-cli.js" session-status <sessionId>
+```
+
+The response will be `{"status":"pending"}` until the user completes the
+browser flow, then `{"status":"ready", "email":"..."}`. Don't poll in a
+tight loop — just run it once when the user says they're done, or let the
+next `/prism:*` command naturally trigger the sign-in check.
