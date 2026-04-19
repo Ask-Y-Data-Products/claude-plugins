@@ -14,6 +14,8 @@ This marketplace hosts all Ask-Y plugins in one repo. Add it once and install an
 
 `/prism:setup` is a one-time step per user — it writes Prism-only permission rules into your `~/.claude/settings.json` and kicks off a browser sign-in. Restart your Claude client afterwards so the new permissions take effect.
 
+> **Beta customer?** See [`INSTALL.md`](./INSTALL.md) for the full install guide covering both Claude Code and Claude Cowork (including the ZIP-upload path for Cowork org admins).
+
 ## Plugins
 
 ### prism

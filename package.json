@@ -1,0 +1,17 @@
+{
+  "name": "ask-y-claude-plugins",
+  "version": "0.8.1",
+  "description": "Official Ask-Y Claude plugins marketplace — tooling metadata only; plugins themselves are dep-free.",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build-zip.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ask-Y-Data-Products/claude-plugins.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

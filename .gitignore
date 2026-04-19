@@ -20,6 +20,9 @@ desktop.ini
 *.tmp
 tmp-*
 
+# Build artifacts (ZIPs uploaded to GitHub Releases, not committed)
+dist/
+
 # Local dev-only plugin data (creds, markers)
 .prism-plugin/
 
