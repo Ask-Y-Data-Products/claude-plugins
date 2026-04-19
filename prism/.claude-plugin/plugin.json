@@ -1,6 +1,6 @@
 {
   "name": "prism",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Prism plugin for Claude clients (Claude Code, Cowork, etc.): browser-based secure sign-in, then list workspaces, projects, and catalog via asky.core. Credentials never transit chat.",
   "author": { "name": "Ask-Y" },
   "homepage": "https://github.com/Ask-Y-Data-Products/claude-plugins",
@@ -10,7 +10,7 @@
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/bridge.js"],
       "env": {
-        "PRISM_BACKEND_URL": "https://stage.ask-y.ai"
+        "PRISM_BACKEND_URL": "https://appstage.ask-y.ai"
       }
     }
   }

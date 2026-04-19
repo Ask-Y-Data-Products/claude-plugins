@@ -38,11 +38,11 @@ Skill sources live under [`prism/commands/`](./prism/commands).
 
 - **Node.js 18 or newer** (the bridge uses native `fetch`).
 - A Claude client that supports the plugin marketplace (Claude Code, Cowork, etc.).
-- Network access to the Prism backend. Default: `https://stage.ask-y.ai`.
+- Network access to the Prism backend. Default: `https://appstage.ask-y.ai`.
 
 ## Configuration
 
-The Prism plugin defaults to `https://stage.ask-y.ai`. To point at a different backend (local dev, a different stage, prod), set `PRISM_BACKEND_URL` in the environment that launches your Claude client:
+The Prism plugin defaults to `https://appstage.ask-y.ai`. To point at a different backend (local dev, a different stage, prod), set `PRISM_BACKEND_URL` in the environment that launches your Claude client:
 
 ```powershell
 # Windows (PowerShell)
