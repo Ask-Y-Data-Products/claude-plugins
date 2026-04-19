@@ -87,7 +87,7 @@ When a command takes `[workspaceId]` or `[projectId]` arguments, omitting them m
 
 ## Beta feedback
 
-Found a bug, hit a rough edge, want a feature? Email your Ask-Y contact (or `beta@ask-y.ai`) with:
+Found a bug, hit a rough edge, want a feature? Email [avigad@ask-y.ai](mailto:avigad@ask-y.ai) with:
 
 - Claude client (Code / Cowork) and its version
 - The slash command you ran
